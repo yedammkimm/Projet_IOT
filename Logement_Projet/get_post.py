@@ -17,58 +17,67 @@ def get_db_connection():
 @app.route('/')
 def index():
     conn = get_db_connection()
-    rooms = conn.execute('SELECT * FROM Piece').fetchall()
+    rooms = conn.execute('''
+        SELECT p.*, COUNT(c.capteur_id) AS capteurs
+        FROM Piece p
+        LEFT JOIN Capteur c ON p.piece_id = c.piece_id
+        GROUP BY p.piece_id
+    ''').fetchall()
+
+    # Fetch capteur types for each room
+    capteurs_details = conn.execute('''
+        SELECT p.piece_id, GROUP_CONCAT(c.reference_commercial, ', ') AS capteur_types
+        FROM Piece p
+        LEFT JOIN Capteur c ON p.piece_id = c.piece_id
+        GROUP BY p.piece_id
+    ''').fetchall()
+
+    # Replace None with an empty string to prevent split errors
+    capteurs_dict = {capteur['piece_id']: capteur['capteur_types'] or '' for capteur in capteurs_details}
 
     room_states = []
-    scale_factor = 100  # Définir un facteur de mise à l'échelle pour les coordonnées
-    current_x = 50  # Coordonnée de départ pour x
-    current_y = 50  # Coordonnée de départ pour y
-    default_offset_x = 250  # Espace horizontal minimum entre les pièces
-    default_offset_y = 200  # Espace vertical minimum si on change de ligne
-    positions_occupied = []  # Pour garder une trace des positions occupées
+    room_width = 300  # Fixed room width
+    room_height = 200  # Fixed room height
+    offset_x = room_width + 20  # Reduced horizontal spacing
+    offset_y = room_height + 20  # Reduced vertical spacing
 
-    # Récupérer la liste des noms des pièces
     room_names = [room['nom'] for room in rooms]
-
-    print("Rooms fetched from the database:")
-    for room in rooms:
-        print(f"Nom: {room['nom']}, Coord_x: {room['coord_x']}, Coord_y: {room['coord_y']}, Coord_z: {room['coord_z']}")
 
     for room in rooms:
         room_name = room['nom']
         room_id = room['piece_id']
 
-        # Appliquer un facteur d'échelle aux coordonnées
-        coord_x = (room['coord_x'] * scale_factor) if room['coord_x'] is not None else current_x
-        coord_y = (room['coord_y'] * scale_factor) if room['coord_y'] is not None else current_y
-        coord_z = room['coord_z'] if room['coord_z'] is not None else 0
+        # Ensure coord_x and coord_y are integers
+        try:
+            coord_x = int(room['coord_x']) * offset_x if room['coord_x'] not in (None, '') else 0
+        except ValueError:
+            coord_x = 0
 
-        # Vérifier s'il y a une superposition potentielle
-        while (coord_x, coord_y, coord_z) in positions_occupied:
-            # Si les coordonnées sont déjà utilisées, on décale la position
-            coord_x += default_offset_x
-            if coord_x > 800:  # Si x dépasse la largeur, on passe à la ligne suivante
-                coord_x = 50
-                coord_y += default_offset_y
+        try:
+            coord_y = int(room['coord_y']) * offset_y if room['coord_y'] not in (None, '') else 0
+        except ValueError:
+            coord_y = 0
 
-        # Ajouter les coordonnées actuelles aux positions occupées
-        positions_occupied.append((coord_x, coord_y, coord_z))
+        # Safely convert coord_z to int, default to 0 if empty or invalid
+        try:
+            coord_z = int(room['coord_z']) if room['coord_z'] not in (None, '') else 0
+        except ValueError:
+            coord_z = 0
 
-        # Ajouter les informations de la pièce
         room_states.append({
             'piece_id': room_id,
             'nom': room_name,
             'coord_x': coord_x,
             'coord_y': coord_y,
             'coord_z': coord_z,
-            'capteurs': 0  # Supposons qu'il n'y ait pas de capteurs pour le moment
+            'capteurs': room['capteurs'],
+            'capteur_types': capteurs_dict.get(room_id, '')
         })
 
     conn.close()
- 
-    return render_template('partie3.html', rooms=room_states, room_names=room_names,capteur_states = capteur_states)
+    return render_template('partie3.html', rooms=room_states, room_names=room_names, capteur_states=capteur_states)
 
-    
+
 # Route pour récupérer et afficher un graphique des factures
 @app.route('/factures_p3', methods=['GET'])
 def factures_p3():
@@ -413,16 +422,45 @@ def manage_rooms():
 
 
 
+@app.route('/get_devices/<int:room_id>', methods=['GET'])
+def get_devices(room_id):
+    conn = get_db_connection()
+    devices = conn.execute('SELECT * FROM Capteur WHERE piece_id = ?', (room_id,)).fetchall()
+    conn.close()
+    devices_list = [{'capteur_id': device['capteur_id'], 'reference_commercial': device['reference_commercial']} for device in devices]
+    return jsonify(devices_list)
+
+
 # Gestion des Capteurs/Actionneurs
 @app.route('/manage_devices', methods=['POST'])
 def manage_devices():
     device_type = request.form.get('deviceType')
     room_id = request.form.get('roomSelect')
+
     conn = get_db_connection()
-    conn.execute('INSERT INTO Capteur (reference_commercial, type_id, piece_id) VALUES (?, ?, ?)',
-                 (device_type, 1, room_id))  # `type_id` devrait être résolu en fonction du type de capteur.
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute('INSERT INTO Capteur (reference_commercial, type_id, piece_id) VALUES (?, ?, ?)',
+                     (device_type, 1, room_id))
+        conn.commit()
+
+        print(f"Device of type {device_type} added to room ID {room_id}")
+    finally:
+        conn.close()
+
+    return redirect(url_for('index'))
+
+@app.route('/delete_device', methods=['POST'])
+def delete_device():
+    capteur_id = request.form.get('capteur_id')
+
+    conn = get_db_connection()
+    try:
+        conn.execute('DELETE FROM Capteur WHERE capteur_id = ?', (capteur_id,))
+        conn.commit()
+        print(f"Capteur/Actionneur with ID {capteur_id} deleted.")
+    finally:
+        conn.close()
+
     return redirect(url_for('index'))
 
 # Définir les Seuils de Consommation et Alertes
